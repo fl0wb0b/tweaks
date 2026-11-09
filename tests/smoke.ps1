@@ -76,8 +76,11 @@ Leeren
 New-Item -ItemType Directory $Ziel | Out-Null
 icacls $Ziel /grant '*S-1-5-32-546:(OI)(CI)R' /Q | Out-Null                         # Markierung: Gaeste lesen
 cmd /c mklink /J $Dir $Ziel | Out-Null
-icacls $Dir /reset /L /C /Q | Out-Null
-icacls $Dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' /L /C /Q | Out-Null
+icacls $Dir /reset /L /Q | Out-Null                                                # ohne /C: sonst Exit 0 trotz Fehler
+$Rc1 = $LASTEXITCODE
+icacls $Dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' /L /Q | Out-Null
+$Rc2 = $LASTEXITCODE
+Check "icacls /L auf der Junction erfolgreich (Exit $Rc1/$Rc2)" ($Rc1 -eq 0 -and $Rc2 -eq 0)
 $ZielAcl = Get-Acl $Ziel
 Check 'icacls /L laesst das Junction-Ziel unveraendert' ((-not $ZielAcl.AreAccessRulesProtected) -and @($ZielAcl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-546' }).Count -gt 0)
 
