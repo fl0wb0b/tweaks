@@ -57,9 +57,10 @@ function Test-Ausgabepfade {
         if ($i -and ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Stop-Ausgabe "$p ist eine Verknuepfung (Reparse Point)" }
     }
 }
-# /L: icacls aendert immer das Objekt unter dem Pfad selbst und folgt keiner (zwischendurch untergeschobenen) Verknuepfung
+# /L: icacls aendert immer das Objekt unter dem Pfad selbst und folgt keiner (zwischendurch untergeschobenen) Verknuepfung.
+# Ohne /C: mit /C meldet icacls einen Fehler nur als Text, der Exit-Code bleibt 0
 function Set-Rechte {
-    icacls @args /L /C /Q | Out-Null
+    icacls @args /L /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { Stop-Ausgabe "Rechte fuer $($args[0]) nicht setzbar (Datei loeschen, sie wird neu angelegt)" }
 }
 Test-Ausgabepfade
