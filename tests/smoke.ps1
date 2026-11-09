@@ -57,6 +57,26 @@ Remove-Item $Key -Force
 $Inv = Inventar
 Check 'Inventar trotz DWORD-DisplayName dekodierbar und gefuellt' ($Inv -and $Inv.count -gt 1)
 
+# 4. Rechte einer Ausgabedatei nicht setzbar (hier: Datei exklusiv gesperrt): Abbruch, bevor etwas geschrieben wird
+Leeren
+New-Item -ItemType Directory $Dir | Out-Null
+Set-Content "$Dir\update_status.txt" 'ALT'
+Set-Content "$Dir\report.html" 'ALT'
+$Sperre = [IO.File]::Open("$Dir\report.html", 'Open', 'ReadWrite', 'None')
+Lauf
+$Sperre.Close()
+Check 'icacls-Fehler: update_status.txt unveraendert' ((Get-Content "$Dir\update_status.txt" -Raw).Trim() -eq 'ALT')
+
+# 5. Annahme hinter dem Absichern: icacls mit /L aendert bei einer Junction die Junction selbst, nie ihr Ziel
+Leeren
+New-Item -ItemType Directory $Ziel | Out-Null
+icacls $Ziel /grant '*S-1-5-32-546:(OI)(CI)R' /Q | Out-Null                         # Markierung: Gaeste lesen
+cmd /c mklink /J $Dir $Ziel | Out-Null
+icacls $Dir /reset /L /C /Q | Out-Null
+icacls $Dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' /L /C /Q | Out-Null
+$ZielAcl = Get-Acl $Ziel
+Check 'icacls /L laesst das Junction-Ziel unveraendert' ((-not $ZielAcl.AreAccessRulesProtected) -and @($ZielAcl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-546' }).Count -gt 0)
+
 Leeren
 if ($script:Fail) { Write-Output "$($script:Fail) FEHLER"; exit 1 }
 Write-Output 'alle Pruefungen bestanden'
