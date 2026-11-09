@@ -18,8 +18,11 @@
 #         Scan-Source-Policy (2022/2025) zusaetzlich zu DisableDualScan (2016/2019)
 # v2.1.2: update_status.txt BOM-frei (Out-File UTF8 schreibt in WinPS 5.1 BOM ->
 #         kann Zabbix-JSONPath-Preprocessing brechen)
+# v2.1.3: C:\Zabbix abgesichert (nur SYSTEM/Administratoren schreiben, keine Junction/Reparse Points),
+#         State-Datei in der Zukunft blockiert das Inventar nicht mehr, Inventar mit 0/1 Eintraegen,
+#         HTML: Fehlerzeile statt "Keine ausstehenden Updates", allgemeiner Dual-Scan-Hinweis
 
-$ScriptVersion  = "2.1.2"
+$ScriptVersion  = "2.1.3"
 $OutputDir      = "C:\Zabbix"
 $OutputFile     = "$OutputDir\update_status.txt"
 $LogFile        = "$OutputDir\update_check.log"
@@ -39,9 +42,25 @@ function HtmlEscape($s) {
     "$s".Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;')
 }
 
-if (-not (Test-Path $OutputDir)) {
+# Ausgabeordner absichern: das Skript laeuft als SYSTEM. Ein Ordner direkt unter C:\ erbt sonst Rechte, mit denen Benutzer
+# dort Dateien/Ordner anlegen (Server) bzw. aendern (Client) koennen; wer das kann, faelscht Ausgaben oder leitet die
+# Schreibzugriffe von SYSTEM per Junction an beliebige Orte um. Daher: Reparse Points ablehnen, Rechte bei jedem Lauf setzen.
+$OutFiles = @($OutputFile, $LogFile, $InventoryFile, $InventoryJson, $InventoryState, $HtmlFile)
+foreach ($p in @($OutputDir) + $OutFiles) {
+    $i = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($i -and ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Write-Error "$p ist eine Verknuepfung (Reparse Point) - Abbruch, nichts geschrieben"
+        exit 1
+    }
+}
+if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
+# Vererbung von C:\ kappen, fremde Eintraege entfernen: SYSTEM und Administratoren Vollzugriff, Benutzer nur lesen (wie bisher);
+# OWNER RIGHTS nur lesen, damit Besitzer eines vorab angelegten Ordners oder untergeschobener Dateien keine Rechte behalten
+icacls $OutputDir /reset /C /Q | Out-Null
+icacls $OutputDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' '*S-1-3-4:(OI)(CI)RX' /C /Q | Out-Null
+foreach ($f in $OutFiles) { if (Test-Path -LiteralPath $f) { icacls $f /reset /C /Q | Out-Null } }
 
 # ============================================================
 # TEIL 1: Windows Update Status (jeder Lauf)
@@ -197,7 +216,8 @@ if (Test-Path $InventoryState) {
     $LastRun = (Get-Content $InventoryState -Raw -ErrorAction SilentlyContinue).Trim()
     try {
         $LastRunDate = [datetime]::Parse($LastRun)
-        if (((Get-Date) - $LastRunDate).TotalDays -lt $InventoryMaxAgeDays) {
+        $Alter = ((Get-Date) - $LastRunDate).TotalDays
+        if ($Alter -ge 0 -and $Alter -lt $InventoryMaxAgeDays) {    # Datum in der Zukunft (Uhr verstellt): faellig
             $RunInventory = $false
         }
     } catch {
@@ -225,10 +245,10 @@ if ($RunInventory) {
             $RegSources += @{ Path = "Registry::HKEY_USERS\$($hive.PSChildName)\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"; Arch = $(if ($Is64OS) { 'x64' } else { 'x86' }); Source = 'HKU' }
         }
 
-        $Entries = foreach ($src in $RegSources) {
+        $Entries = @(foreach ($src in $RegSources) {     # @(): bei 0 oder 1 Eintrag sonst $null bzw. Einzelobjekt, += unten scheitert
             $Items = Get-ItemProperty -Path $src.Path -ErrorAction SilentlyContinue |
                 Where-Object {
-                    $_.DisplayName -and $_.DisplayName.Trim() -ne '' -and
+                    $_.DisplayName -and ([string]$_.DisplayName).Trim() -ne '' -and   # [string]: DisplayName kann (Benutzer-Hive) auch DWORD sein
                     -not $_.SystemComponent -and
                     -not $_.ParentKeyName -and                                        # Kind-Eintraege von Updates
                     $_.ReleaseType -notmatch 'Update|Hotfix|ServicePack' -and         # als Update/Hotfix markiert
@@ -236,7 +256,7 @@ if ($RunInventory) {
                 }
             foreach ($it in $Items) {
                 [PSCustomObject]@{
-                    name         = $it.DisplayName.Trim()
+                    name         = ([string]$it.DisplayName).Trim()
                     version      = $it.DisplayVersion
                     publisher    = $it.Publisher
                     arch         = $src.Arch
@@ -244,7 +264,7 @@ if ($RunInventory) {
                     install_date = $it.InstallDate
                 }
             }
-        }
+        })
 
         # --- OS als Inventory-Eintrag (fuer OS-Advisories im CSAF-Match) ---
         $CV      = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -347,7 +367,9 @@ try {
     foreach ($u in $UpdateList) {
         $UpdateRows += "<li>$(HtmlEscape $u)</li>`n"
     }
-    if (-not $UpdateRows) { $UpdateRows = "<li>Keine ausstehenden Updates</li>" }
+    if (-not $UpdateRows) {
+        $UpdateRows = if ($WuStatus -eq 'error') { "<li>Update-Pruefung fehlgeschlagen: $(HtmlEscape $Output.error)</li>" } else { "<li>Keine ausstehenden Updates</li>" }
+    }
 
     $WsusLine = ""
     if ($Output.wsus_server) {
@@ -355,7 +377,7 @@ try {
         if ($Output.wsus_target_group) { $WsusLine += ", Gruppe: $(HtmlEscape $Output.wsus_target_group)" }
         $WsusLine += ")"
     }
-    $DualScanTxt = if ($Output.dual_scan_risk) { " &middot; <b>Achtung: Dual-Scan-Risiko (Deferral-Policies aktiv, DisableDualScan nicht gesetzt)</b>" } else { "" }
+    $DualScanTxt = if ($Output.dual_scan_risk) { " &middot; <b>Achtung: Dual-Scan-Risiko (Updates koennen an WSUS vorbei von Microsoft Update kommen: Deferral-Policies ohne DisableDualScan oder Scan Source auf MU)</b>" } else { "" }
 
     # --- Inventar-Tabelle ---
     $InvRows  = ""
