@@ -1,10 +1,10 @@
 # Get-WindowsUpdateStatus.ps1  (v2.0.0)
-# Läuft als Scheduled Task (SYSTEM) alle 6 Stunden
+# Laeuft als Scheduled Task (SYSTEM) alle 6 Stunden
 # Teil 1: Windows Update Status  -> C:\Zabbix\update_status.txt        (jeder Lauf)
 # Teil 2: Software-Inventar      -> C:\Zabbix\software_inventory.b64   (woechentlich, State-Gate)
 #                                   C:\Zabbix\software_inventory.json  (Klartext, fuer HTML/Debug)
 # Teil 3: HTML-Report            -> C:\Zabbix\report.html              (jeder Lauf)
-# Zabbix liest .txt und .b64 per vfs.file.contents — kein Active Check, kein UserParameter
+# Zabbix liest .txt und .b64 per vfs.file.contents - kein Active Check, kein UserParameter
 #
 # v2.0.0: + OS/Build als Inventory-Eintrag (CVE-Match fuer OS-Advisories)
 #         + Architektur pro Eintrag (x86/x64 via WOW6432Node)
@@ -18,7 +18,8 @@
 #         Scan-Source-Policy (2022/2025) zusaetzlich zu DisableDualScan (2016/2019)
 # v2.1.2: update_status.txt BOM-frei (Out-File UTF8 schreibt in WinPS 5.1 BOM ->
 #         kann Zabbix-JSONPath-Preprocessing brechen)
-# v2.1.3: C:\Zabbix abgesichert (nur SYSTEM/Administratoren schreiben, keine Junction/Reparse Points),
+# v2.1.3: C:\Zabbix abgesichert (nur SYSTEM/Administratoren schreiben, keine Junction/Reparse Points,
+#         icacls mit /L und Abbruch, wenn Rechte nicht setzbar sind),
 #         State-Datei in der Zukunft blockiert das Inventar nicht mehr, Inventar mit 0/1 Eintraegen,
 #         HTML: Fehlerzeile statt "Keine ausstehenden Updates", allgemeiner Dual-Scan-Hinweis
 
@@ -46,21 +47,34 @@ function HtmlEscape($s) {
 # dort Dateien/Ordner anlegen (Server) bzw. aendern (Client) koennen; wer das kann, faelscht Ausgaben oder leitet die
 # Schreibzugriffe von SYSTEM per Junction an beliebige Orte um. Daher: Reparse Points ablehnen, Rechte bei jedem Lauf setzen.
 $OutFiles = @($OutputFile, $LogFile, $InventoryFile, $InventoryJson, $InventoryState, $HtmlFile)
-foreach ($p in @($OutputDir) + $OutFiles) {
-    $i = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
-    if ($i -and ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        Write-Error "$p ist eine Verknuepfung (Reparse Point) - Abbruch, nichts geschrieben"
-        exit 1
+function Stop-Ausgabe($Grund) {
+    Write-Error "$Grund - Abbruch, nichts geschrieben"
+    exit 1
+}
+function Test-Ausgabepfade {
+    foreach ($p in @($OutputDir) + $OutFiles) {
+        $i = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        if ($i -and ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Stop-Ausgabe "$p ist eine Verknuepfung (Reparse Point)" }
     }
 }
+# /L: icacls aendert immer das Objekt unter dem Pfad selbst und folgt keiner (zwischendurch untergeschobenen) Verknuepfung.
+# Ohne /C: mit /C meldet icacls einen Fehler nur als Text, der Exit-Code bleibt 0
+function Set-Rechte {
+    icacls @args /L /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { Stop-Ausgabe "Rechte fuer $($args[0]) nicht setzbar (Datei loeschen, sie wird neu angelegt)" }
+}
+Test-Ausgabepfade
 if (-not (Test-Path -LiteralPath $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 # Vererbung von C:\ kappen, fremde Eintraege entfernen: SYSTEM und Administratoren Vollzugriff, Benutzer nur lesen (wie bisher);
 # OWNER RIGHTS nur lesen, damit Besitzer eines vorab angelegten Ordners oder untergeschobener Dateien keine Rechte behalten
-icacls $OutputDir /reset /C /Q | Out-Null
-icacls $OutputDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' '*S-1-3-4:(OI)(CI)RX' /C /Q | Out-Null
-foreach ($f in $OutFiles) { if (Test-Path -LiteralPath $f) { icacls $f /reset /C /Q | Out-Null } }
+Set-Rechte $OutputDir /reset
+Set-Rechte $OutputDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' '*S-1-3-4:(OI)(CI)RX'
+foreach ($f in $OutFiles) { if (Test-Path -LiteralPath $f) { Set-Rechte $f /reset } }
+# Erneut pruefen: wurde zwischen erster Pruefung und icacls getauscht, faellt es hier auf. Danach koennen nur noch
+# SYSTEM und Administratoren den Ordner ersetzen.
+Test-Ausgabepfade
 
 # ============================================================
 # TEIL 1: Windows Update Status (jeder Lauf)

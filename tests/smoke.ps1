@@ -57,6 +57,33 @@ Remove-Item $Key -Force
 $Inv = Inventar
 Check 'Inventar trotz DWORD-DisplayName dekodierbar und gefuellt' ($Inv -and $Inv.count -gt 1)
 
+# 4. Rechte einer Ausgabedatei nicht setzbar: jeder darf schreiben, niemand die Rechte aendern (OWNER RIGHTS nur lesen nimmt
+#    auch dem Besitzer WRITE_DAC). Das Skript muss abbrechen, bevor es etwas schreibt. Eine Dateisperre reicht dafuer nicht:
+#    sie sperrt nur Inhaltszugriffe, nicht das Aendern der Rechte.
+Leeren
+New-Item -ItemType Directory $Dir | Out-Null
+Set-Content "$Dir\update_status.txt" 'ALT'
+Set-Content "$Dir\report.html" 'ALT'
+icacls "$Dir\report.html" /inheritance:r /grant:r '*S-1-1-0:(R,W)' '*S-1-3-4:(R)' /Q | Out-Null
+$Vorbedingung = $LASTEXITCODE -eq 0
+icacls "$Dir\report.html" /reset /Q 2>$null | Out-Null
+Check 'Vorbedingung: icacls kann die Rechte der Datei nicht mehr aendern' ($Vorbedingung -and $LASTEXITCODE -ne 0)
+Lauf
+Check 'icacls-Fehler: update_status.txt unveraendert' ((Get-Content "$Dir\update_status.txt" -Raw).Trim() -eq 'ALT')
+
+# 5. Annahme hinter dem Absichern: icacls mit /L aendert bei einer Junction die Junction selbst, nie ihr Ziel
+Leeren
+New-Item -ItemType Directory $Ziel | Out-Null
+icacls $Ziel /grant '*S-1-5-32-546:(OI)(CI)R' /Q | Out-Null                         # Markierung: Gaeste lesen
+cmd /c mklink /J $Dir $Ziel | Out-Null
+icacls $Dir /reset /L /Q | Out-Null                                                # ohne /C: sonst Exit 0 trotz Fehler
+$Rc1 = $LASTEXITCODE
+icacls $Dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' /L /Q | Out-Null
+$Rc2 = $LASTEXITCODE
+Check "icacls /L auf der Junction erfolgreich (Exit $Rc1/$Rc2)" ($Rc1 -eq 0 -and $Rc2 -eq 0)
+$ZielAcl = Get-Acl $Ziel
+Check 'icacls /L laesst das Junction-Ziel unveraendert' ((-not $ZielAcl.AreAccessRulesProtected) -and @($ZielAcl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-546' }).Count -gt 0)
+
 Leeren
 if ($script:Fail) { Write-Output "$($script:Fail) FEHLER"; exit 1 }
 Write-Output 'alle Pruefungen bestanden'
